@@ -1,0 +1,9 @@
+flask==2.3.3
+flask-cors==4.0.0
+flask-jwt-extended==4.5.2
+python-dotenv==1.0.0
+cryptography==41.0.7
+ecdsa==0.18.0
+mnemonic==0.20
+requests==2.31.0
+web3==6.0.0
