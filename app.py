@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from dotenv import load_dotenv
@@ -25,10 +25,69 @@ CORS(app, origins=[
     "http://localhost:3001",
     "http://127.0.0.1:3001",
     "https://zeontrust.net",
-    "https://www.zeontrust.net"
+    "https://www.zeontrust.net",
+    "https://zeontrust-backend.onrender.com"
 ], supports_credentials=True)
 
 jwt = JWTManager(app)
+
+# ==================== ROOT ROUTE ====================
+
+@app.route('/')
+def home():
+    return jsonify({
+        'message': 'Zeontrust Wallet API is running!',
+        'status': 'healthy',
+        'version': '1.0.0',
+        'endpoints': {
+            'health': '/api/health',
+            'auth': {
+                'register': 'POST /api/auth/register',
+                'login': 'POST /api/auth/login',
+                'verify': 'GET /api/auth/verify'
+            },
+            'wallets': {
+                'list': 'GET /api/wallets',
+                'create': 'POST /api/wallets/create',
+                'detail': 'GET /api/wallets/<id>'
+            },
+            'balance': 'GET /api/balance/<wallet_id>',
+            'transactions': 'GET /api/transactions/<wallet_id>',
+            'tokens': 'GET /api/tokens/list'
+        }
+    })
+
+# ==================== SERVE STATIC FILES ====================
+
+@app.route('/<path:path>')
+def serve_static(path):
+    """Serve static HTML, CSS, JS files"""
+    # Check if file exists
+    if os.path.exists(path):
+        return send_from_directory('.', path)
+    
+    # Check if file exists in subdirectories
+    possible_paths = [
+        path,
+        f'nova-wallet/{path}',
+        f'admin/{path}',
+        f'ZeontrustSwap/{path}',
+        f'css/{path}',
+        f'js/{path}',
+        f'assets/{path}'
+    ]
+    
+    for p in possible_paths:
+        if os.path.exists(p):
+            return send_from_directory(os.path.dirname(p) or '.', os.path.basename(p))
+    
+    return jsonify({'error': 'File not found'}), 404
+
+# ==================== HEALTH ROUTE ====================
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'message': 'Zeontrust Wallet API is running!'})
 
 # ==================== DATABASE HELPER ====================
 
@@ -44,12 +103,6 @@ def hash_password(password):
 
 def verify_password(password, password_hash):
     return hash_password(password) == password_hash
-
-# ==================== HEALTH ROUTE ====================
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy', 'message': 'Zeontrust Wallet API is running!'})
 
 # ==================== AUTH ROUTES ====================
 
@@ -129,6 +182,35 @@ def login():
         return jsonify({
             'success': True,
             'token': access_token,
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'email': user['email'],
+                'is_admin': user['is_admin']
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/auth/verify', methods=['GET'])
+@jwt_required()
+def verify_token():
+    try:
+        user_id = get_jwt_identity()
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, username, email, is_admin, is_active FROM users WHERE id = ?', (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        if not user['is_active']:
+            return jsonify({'error': 'Account is blocked'}), 403
+        
+        return jsonify({
+            'success': True,
             'user': {
                 'id': user['id'],
                 'username': user['username'],
@@ -578,11 +660,13 @@ def admin_get_users():
 # ==================== RUN SERVER ====================
 
 if __name__ == '__main__':
+    import os
+    port = int(os.environ.get('PORT', 5000))
     print("\n" + "="*50)
     print("🚀 Zeontrust Wallet Backend Server")
     print("="*50)
-    print("📍 Running on: https://zeontrust.net")
-    print("📍 API Health: https://zeontrust.net/api/health")
+    print(f"📍 Running on: http://0.0.0.0:{port}")
+    print("📍 API Health: /api/health")
     print("="*50 + "\n")
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=port)
