@@ -46,6 +46,103 @@ def hash_password(password):
 def verify_password(password, password_hash):
     return hash_password(password) == password_hash
 
+# ==================== DATABASE INITIALIZATION ====================
+
+def init_database():
+    """Initialize database tables on startup"""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Create users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT 1,
+                is_admin BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        ''')
+        
+        # Create wallets table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                wallet_name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        
+        # Create network_accounts table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS network_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet_id INTEGER NOT NULL,
+                network TEXT NOT NULL,
+                address TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id)
+            )
+        ''')
+        
+        # Create transactions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet_id INTEGER NOT NULL,
+                network TEXT NOT NULL,
+                tx_hash TEXT UNIQUE NOT NULL,
+                from_address TEXT NOT NULL,
+                to_address TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (wallet_id) REFERENCES wallets(id)
+            )
+        ''')
+        
+        # Create custom_tokens table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                network TEXT NOT NULL,
+                contract_address TEXT NOT NULL,
+                token_name TEXT NOT NULL,
+                token_symbol TEXT NOT NULL,
+                decimals INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        ''')
+        
+        # Insert default admin user
+        admin_password_hash = hash_password('admin123')
+        cursor.execute('SELECT id FROM users WHERE email = ?', ('admin@Zeontrustwallet.com',))
+        if not cursor.fetchone():
+            cursor.execute('''
+                INSERT INTO users (username, email, password_hash, is_admin, is_active)
+                VALUES (?, ?, ?, ?, ?)
+            ''', ('admin', 'admin@Zeontrustwallet.com', admin_password_hash, 1, 1))
+            print("✅ Admin user created")
+        else:
+            print("✅ Admin user already exists")
+        
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized successfully!")
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+
+# Call database initialization
+init_database()
+
 # ==================== ROOT & STATIC ROUTES ====================
 
 @app.route('/')
@@ -68,7 +165,11 @@ def home():
             },
             'balance': 'GET /api/balance/<wallet_id>',
             'transactions': 'GET /api/transactions/<wallet_id>',
-            'tokens': 'GET /api/tokens/list'
+            'tokens': 'GET /api/tokens/list',
+            'admin': {
+                'users': 'GET /api/admin/users',
+                'stats': 'GET /api/admin/stats'
+            }
         }
     })
 
@@ -106,24 +207,15 @@ def register():
         conn = get_db()
         cursor = conn.cursor()
         
-        # Create tables if not exists
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                is_active BOOLEAN DEFAULT 1,
-                is_admin BOOLEAN DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_login TIMESTAMP
-            )
-        ''')
-        
         cursor.execute('SELECT id FROM users WHERE email = ?', (email,))
         if cursor.fetchone():
             conn.close()
             return jsonify({'error': 'Email already registered'}), 400
+        
+        cursor.execute('SELECT id FROM users WHERE username = ?', (username,))
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({'error': 'Username already taken'}), 400
         
         cursor.execute('INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)',
                        (username, email, password_hash))
@@ -158,7 +250,7 @@ def login():
         if not user['is_active']:
             return jsonify({'error': 'Account is blocked. Contact admin.'}), 403
         
-        # FIX: Convert id to string for JWT
+        # Convert id to string for JWT
         access_token = create_access_token(identity=str(user['id']))
         
         return jsonify({
@@ -178,7 +270,7 @@ def login():
 @jwt_required()
 def verify_token():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         conn = get_db()
         cursor = conn.cursor()
@@ -208,7 +300,7 @@ def verify_token():
 @jwt_required()
 def verify_password_route():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         data = request.get_json()
         password = data.get('password')
@@ -235,20 +327,10 @@ def verify_password_route():
 @jwt_required()
 def get_wallets():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         conn = get_db()
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS wallets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                wallet_name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
         
         cursor.execute('SELECT id, wallet_name, created_at FROM wallets WHERE user_id = ?', (user_id,))
         wallets = cursor.fetchall()
@@ -265,24 +347,13 @@ def get_wallets():
 @jwt_required()
 def create_wallet():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         data = request.get_json()
         wallet_name = data.get('wallet_name', 'My Wallet')
         
         conn = get_db()
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS network_accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                wallet_id INTEGER NOT NULL,
-                network TEXT NOT NULL,
-                address TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (wallet_id) REFERENCES wallets(id)
-            )
-        ''')
         
         cursor.execute('INSERT INTO wallets (user_id, wallet_name) VALUES (?, ?)', (user_id, wallet_name))
         wallet_id = cursor.lastrowid
@@ -325,7 +396,7 @@ def create_wallet():
 @jwt_required()
 def get_wallet(wallet_id):
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         conn = get_db()
         cursor = conn.cursor()
@@ -357,7 +428,7 @@ def get_wallet(wallet_id):
 @jwt_required()
 def get_balance(wallet_id):
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         network = request.args.get('network', 'tron')
         
@@ -399,7 +470,7 @@ def get_balance(wallet_id):
 @jwt_required()
 def send_transaction():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         data = request.get_json()
         wallet_id = data.get('wallet_id')
@@ -420,21 +491,6 @@ def send_transaction():
         if not wallet:
             conn.close()
             return jsonify({'error': 'Wallet not found'}), 404
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                wallet_id INTEGER NOT NULL,
-                network TEXT NOT NULL,
-                tx_hash TEXT UNIQUE NOT NULL,
-                from_address TEXT NOT NULL,
-                to_address TEXT NOT NULL,
-                amount TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (wallet_id) REFERENCES wallets(id)
-            )
-        ''')
         
         cursor.execute('SELECT address FROM network_accounts WHERE wallet_id = ? AND network = ?', (wallet_id, network))
         result = cursor.fetchone()
@@ -459,7 +515,7 @@ def send_transaction():
 @jwt_required()
 def get_transactions(wallet_id):
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         
         conn = get_db()
@@ -519,7 +575,7 @@ def get_token_list():
 @jwt_required()
 def add_custom_token():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         data = request.get_json()
         network = data.get('network')
@@ -530,20 +586,6 @@ def add_custom_token():
         
         conn = get_db()
         cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS custom_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                network TEXT NOT NULL,
-                contract_address TEXT NOT NULL,
-                token_name TEXT NOT NULL,
-                token_symbol TEXT NOT NULL,
-                decimals INTEGER NOT NULL,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
         
         cursor.execute('INSERT INTO custom_tokens (user_id, network, contract_address, token_name, token_symbol, decimals) VALUES (?, ?, ?, ?, ?, ?)',
                        (user_id, network, contract_address, token_name, token_symbol, decimals))
@@ -589,7 +631,7 @@ def get_swap_quote():
 @jwt_required()
 def request_flashloan():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         user_id = int(get_jwt_identity())
         data = request.get_json()
         amount = data.get('amount')
@@ -649,7 +691,7 @@ def get_super_representatives():
 @jwt_required()
 def admin_get_users():
     try:
-        # FIX: Convert string to int
+        # Convert string to int
         admin_id = int(get_jwt_identity())
         conn = get_db()
         cursor = conn.cursor()
@@ -680,6 +722,70 @@ def admin_get_users():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/admin/stats', methods=['GET'])
+@jwt_required()
+def admin_get_stats():
+    try:
+        admin_id = int(get_jwt_identity())
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT is_admin FROM users WHERE id = ?', (admin_id,))
+        admin = cursor.fetchone()
+        
+        if not admin or not admin['is_admin']:
+            conn.close()
+            return jsonify({'error': 'Admin access required'}), 403
+        
+        # Get counts
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0] or 0
+        
+        cursor.execute('SELECT COUNT(*) FROM wallets')
+        total_wallets = cursor.fetchone()[0] or 0
+        
+        cursor.execute('SELECT COUNT(*) FROM transactions')
+        total_transactions = cursor.fetchone()[0] or 0
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'stats': {
+                'total_users': total_users,
+                'total_wallets': total_wallets,
+                'total_transactions': total_transactions
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ==================== MAKE ADMIN ENDPOINT (Secret Protected) ====================
+
+@app.route('/api/admin/make-admin', methods=['POST'])
+def make_admin():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        secret = data.get('secret')
+        
+        # Secret key for security
+        if secret != 'zeontrust_admin_secret_2024':
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_admin = 1 WHERE email = ?', (email,))
+        conn.commit()
+        affected = cursor.rowcount
+        conn.close()
+        
+        if affected > 0:
+            return jsonify({'success': True, 'message': f'User {email} is now admin'})
+        return jsonify({'error': 'User not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ==================== RUN SERVER ====================
 
 if __name__ == '__main__':
@@ -689,6 +795,8 @@ if __name__ == '__main__':
     print("="*50)
     print(f"📍 Running on: http://0.0.0.0:{port}")
     print("📍 API Health: /api/health")
+    print("📍 Admin Email: admin@Zeontrustwallet.com")
+    print("📍 Admin Password: admin123")
     print("="*50 + "\n")
     
     app.run(debug=False, host='0.0.0.0', port=port)
